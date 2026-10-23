@@ -260,6 +260,63 @@ shufflevector(a, Val(mask))
 <4 x Int32>[1, 4, 2, 3]
 ```
 
+## Runtime permutes, compress and partition
+
+`shufflevector` needs the permutation at compile time. For permutations that
+depend on the data, e.g. in vectorized sorting, partitioning or filtering,
+there are:
+
+- `vpermute(v, idx)`: lane `i` of the result is `v[idx[i] + 1]` (0-based
+  runtime indices).
+- `vcompress(v, mask)`: the lanes selected by `mask` moved to the front, in
+  order; the rest unspecified.
+- `vpartition(v, mask)`: the selected lanes followed by the unselected ones,
+  each in order, and `count(mask)`; one vectorized quicksort partition step.
+- `vstorec(v, ptr, mask)`: compress-store exactly `count(mask)` elements.
+  `vstorec_overwrite(v, ptr, mask)` stores all `N` lanes of `vcompress(v, mask)`,
+  which is faster when the destination has room.
+- `count(mask)`: the number of `true` lanes.
+
+```Julia
+v = Vec{8,Int32}((5, 1, 7, 3, 8, 2, 6, 4))
+w, k = vpartition(v, v < 5)     # ([1, 3, 2, 4, 5, 7, 8, 6], 4)
+
+# Out-of-place partition around a pivot: the low side grows upwards from
+# lo[1], the high side downwards from hi[end]. One vpartition per vector;
+# each full-width store's extra lanes land where the next store will write.
+lo = Vector{Int32}(undef, n + 8); hi = similar(lo); a = 1; r = length(hi)
+for i in 1:8:n
+    x = vload(Vec{8,Int32}, keys, i)
+    w, k = vpartition(x, x < pivot)
+    vstore(w, lo, a)            # lanes 1:k are the keys < pivot
+    vstore(w, hi, r - 7)        # lanes k+1:8 land at hi[r-7+k:r]
+    a += k; r -= 8 - k
+end
+# keys < pivot: lo[1:a-1]; keys ≥ pivot: hi[r+1:end]
+```
+
+LLVM's portable compress (`llvm.masked.compressstore`,
+`llvm.experimental.vector.compress`) is expanded lane by lane on targets without
+a compress instruction, such as AVX2, and LLVM has no portable runtime permute.
+These functions therefore choose their lowering when they are compiled, using
+`SIMD.Targets`:
+
+| Target | `vpermute` | `vcompress`, `vpartition` (2, 4, 8 lanes) | `vstorec` |
+|---|---|---|---|
+| AVX2, 256-bit vectors of 32/64-bit lanes | `vpermd` | table of permutations + `vpermd` | compress + masked store |
+| SSSE3, 128-bit vectors | `pshufb` | table + `pshufb` | compress + masked store (AVX2) |
+| AVX-512 | portable | `llvm.experimental.vector.compress` (`vpcompress`) | `llvm.masked.compressstore` |
+| other | portable | `llvm.experimental.vector.compress` (LLVM ≥ 19), else table | `llvm.masked.compressstore` |
+
+Target-specific instructions are only used when Julia compiles for the host CPU
+(`--cpu-target=native`, the default); set `SIMD_JL_GENERIC=1` to force the
+portable lowering. On AVX2, prefer 256-bit vectors (8 × 32-bit or 4 × 64-bit
+lanes): wider vectors use the slow portable compress.
+`julia --project=. benchmark/partition.jl` measures the partition kernels on
+the current machine; on an AVX2 laptop (Intel Core Ultra 7 268V) `vpartition`
+partitions 8 × `UInt32` at 0.21 ns per key, against 0.56 for branch-free
+scalar code and 4.3 for `llvm.masked.compressstore`.
+
 ## Representing SIMD vector types in Julia
 
 In LLVM, SIMD vectors are represented via a special vector type. LLVM supports vectors of all "primitive" types, i.e. integers (including booleans), floating-point numbers, and pointers. LLVM directly provides arithmetic and logic operations (add, subtract, bit shift, select, etc.) for vector types. For example, adding two numbers is represented in LLVM as

@@ -260,8 +260,11 @@ end
 
 Stable two-way partition of the lanes of `v`: the lanes selected by `mask` first,
 then the others, each group in its original order, together with
-`count(mask)`. This is the vectorized partition step of quicksort: storing the
-result once at each end of the output keeps both groups.
+`count(mask)`. This is the vectorized partition step of quicksort: store the
+whole result at the low end of the output (growing upwards, advance by
+`count(mask)`) and at the high end (growing downwards, advance by
+`N - count(mask)`); each store's extra lanes land where the next store writes.
+See the README for a complete loop.
 
 For 2, 4 or 8 lanes this is one table lookup and one [`vpermute`](@ref), i.e. a
 single `vpermd`/`pshufb` on AVX2/SSSE3.
