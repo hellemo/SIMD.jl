@@ -1172,6 +1172,20 @@ llvm_ir(f, args) = sprint(code_llvm, f, Base.typesof(args...))
         end
     end
 
+    @testset "Targets" begin
+        for f in (:ssse3, :avx2, :avx512f, :avx512vl, :not_a_feature)
+            @test SIMD.Targets.has_feature(f) isa Bool
+        end
+        @test !SIMD.Targets.has_feature(:not_a_feature)
+        withenv("SIMD_JL_GENERIC" => "1") do
+            @test SIMD.Targets.force_generic()
+            @test !SIMD.Targets.has_feature(:ssse3)
+        end
+        if !SIMD.Targets.IS_X86
+            @test !SIMD.Targets.has_feature(:avx2)
+        end
+    end
+
     @testset "count" begin
         for N in (1, 2, 3, 4, 7, 8, 16, 32, 64, 128, 130)
             for _ in 1:20

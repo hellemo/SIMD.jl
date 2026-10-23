@@ -20,6 +20,7 @@ const FloatingTypes = Union{Float16, Float32, Float64}
 const ScalarTypes   = Union{IntegerTypes, FloatingTypes}
 const BScalarTypes  = Union{BIntegerTypes, FloatingTypes}
 const VecTypes      = Union{BScalarTypes, Ptr, LLVMPtr}
+include("targets.jl")
 include("LLVM_intrinsics.jl")
 include("simdvec.jl")
 include("arrayops.jl")
