@@ -509,6 +509,13 @@ Base.reduce(F::Any, v::Vec) = error("reduction not defined for SIMD.Vec on $F")
 
 @inline Base.all(v::Vec{<:Any,Bool}) = reduce(&, v)
 @inline Base.any(v::Vec{<:Any,Bool}) = reduce(|, v)
+"""
+    count(v::Vec{N,Bool}) -> Int
+
+Number of `true` lanes, computed as a population count of [`bitmask(v)`](@ref).
+"""
+@inline Base.count(v::Vec{N,Bool}) where {N} =
+    N <= 128 ? count_ones(bitmask(v)) : sum(i -> Int(v[i]), 1:N)
 @inline Base.maximum(v::Vec) = reduce(max, v)
 @inline Base.minimum(v::Vec) = reduce(min, v)
 @inline Base.prod(v::Vec) = reduce(*, v)

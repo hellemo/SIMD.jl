@@ -1172,6 +1172,17 @@ llvm_ir(f, args) = sprint(code_llvm, f, Base.typesof(args...))
         end
     end
 
+    @testset "count" begin
+        for N in (1, 2, 3, 4, 7, 8, 16, 32, 64, 128, 130)
+            for _ in 1:20
+                b = Tuple(rand(Bool, N))
+                @test count(Vec(b)) === count(b)
+            end
+            @test count(Vec(ntuple(_ -> true, N))) == N
+            @test count(Vec(ntuple(_ -> false, N))) == 0
+        end
+    end
+
 if parse(Bool, get(ENV, "TEST_OPENCL", "true"))
     include("opencl.jl")
 else
