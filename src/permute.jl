@@ -129,3 +129,147 @@ julia> vpermute(Vec{4,Int}((10, 20, 30, 40)), Vec{4,Int}((3, 0, 0, 2)))
 """
 @inline vpermute(v::Vec{N,T}, idx::Vec{N,<:IntegerTypes}) where {N, T<:PermuteTypes} =
     _vpermute(v, idx, Val(:auto))
+
+# --- Compress and partition ---------------------------------------------------
+
+# For N in (2, 4, 8): entry m + 1 lists the lanes selected by bitmask m in
+# order, then the unselected lanes in order (0-based lane indices).
+function _make_partition_table(N)
+    return [Vec{N,UInt8}(Tuple(UInt8.(vcat([j for j in 0:(N - 1) if (m >> j) & 1 == 1],
+                                           [j for j in 0:(N - 1) if (m >> j) & 1 == 0]))))
+            for m in 0:((1 << N) - 1)]
+end
+const _PARTITION_TABLE_2 = _make_partition_table(2)
+const _PARTITION_TABLE_4 = _make_partition_table(4)
+const _PARTITION_TABLE_8 = _make_partition_table(8)
+@inline _partition_table(::Val{2}) = _PARTITION_TABLE_2
+@inline _partition_table(::Val{4}) = _PARTITION_TABLE_4
+@inline _partition_table(::Val{8}) = _PARTITION_TABLE_8
+
+const _HAS_VECTOR_COMPRESS = Base.libllvm_version >= v"19"   # llvm.experimental.vector.compress
+
+# Whether vpermute has a single-instruction lowering for this shape.
+_fast_permute(N, s) = (N * s == 32 && s in (4, 8) && Targets.has_feature(:avx2)) ||
+                      (N * s == 16 && Targets.has_feature(:ssse3))
+
+# 4 x 64-bit lanes as 8 x 32-bit index pairs, so that AVX2 needs no index
+# arithmetic per call: lane j becomes (2j, 2j + 1).
+const _PARTITION_PAIRS_4 = [Vec{8,UInt32}(Tuple(UInt32(2 * Int(t[l]) + h) for l in 1:4 for h in 0:1))
+                            for t in _PARTITION_TABLE_4]
+
+@generated function _table_partition(v::Vec{N,T}, mask::Vec{N,Bool}, ::Val{P}) where {N,T,P}
+    if P === :auto && N == 4 && sizeof(T) == 8 && Targets.has_feature(:avx2)
+        return quote
+            $(Expr(:meta, :inline))
+            idx = @inbounds _PARTITION_PAIRS_4[Int(bitmask(mask)) + 1]
+            reinterpret(Vec{4,T}, _vpermute(reinterpret(Vec{8,UInt32}, v), idx, Val(:auto)))
+        end
+    end
+    return quote
+        $(Expr(:meta, :inline))
+        idx = @inbounds _partition_table(Val(N))[Int(bitmask(mask)) + 1]
+        _vpermute(v, idx, Val(P))
+    end
+end
+
+function _ir_vector_compress(N, t, sfx)
+    return """
+        declare <$N x $t> @llvm.experimental.vector.compress.$sfx(<$N x $t>, <$N x i1>, <$N x $t>)
+        define <$N x $t> @entry(<$N x $t> %v, <$N x i8> %m8) #0 {
+        top:
+            %m = trunc <$N x i8> %m8 to <$N x i1>
+            %r = call <$N x $t> @llvm.experimental.vector.compress.$sfx(<$N x $t> %v, <$N x i1> %m, <$N x $t> poison)
+            ret <$N x $t> %r
+        }
+        attributes #0 = { alwaysinline }"""
+end
+
+@inline function _scalar_compress(v::Vec{N,T}, mask::Vec{N,Bool}) where {N,T}
+    r = v
+    j = 1
+    @inbounds for i in 1:N
+        r = Base.setindex(r, v[i], min(j, N))
+        j += mask[i]
+    end
+    return r
+end
+
+@generated function _vcompress(v::Vec{N,T}, mask::Vec{N,Bool}, ::Val{P}) where {N, T<:PermuteTypes, P}
+    s = sizeof(T)
+    table = N in (2, 4, 8)
+    avx512 = Targets.has_feature(:avx512f) && Targets.has_feature(:avx512vl)
+    if N == 1
+        # Nothing to move. (LLVM 20/23 also crash when legalizing a 1-lane
+        # llvm.experimental.vector.compress, which is scalarized.)
+        return :($(Expr(:meta, :inline)); v)
+    elseif table && P === :auto && _fast_permute(N, s) && !avx512
+        return :($(Expr(:meta, :inline)); _table_partition(v, mask, Val(P)))
+    elseif _HAS_VECTOR_COMPRESS
+        ir = _ir_vector_compress(N, Intrinsics.d[T], Intrinsics.suffix(N, T))
+        return quote
+            $(Expr(:meta, :inline))
+            Vec(Base.llvmcall(($ir, "entry"), LVec{N,T}, Tuple{LVec{N,T}, LVec{N,Bool}}, v.data, mask.data))
+        end
+    elseif table
+        return :($(Expr(:meta, :inline)); _table_partition(v, mask, Val(P)))
+    else
+        return :($(Expr(:meta, :inline)); _scalar_compress(v, mask))
+    end
+end
+
+"""
+    vcompress(v::Vec{N,T}, mask::Vec{N,Bool}) -> Vec{N,T}
+
+Move the lanes of `v` selected by `mask` to the front, keeping their order. The
+remaining `N - count(mask)` lanes are unspecified.
+
+Lowers to a table lookup plus one [`vpermute`](@ref) for 2, 4 or 8 lanes where
+that is a single `vpermd`/`pshufb` (AVX2/SSSE3), to LLVM's
+`llvm.experimental.vector.compress` otherwise (LLVM ≥ 19; a native `vpcompress`
+on AVX-512), and to portable code before LLVM 19. See also [`vpartition`](@ref).
+
+# Example
+```jldoctest
+julia> v = Vec{4,Int}((10, 20, 30, 40));
+
+julia> vcompress(v, v > 15)[1:3]
+(20, 30, 40)
+```
+"""
+@inline vcompress(v::Vec{N,T}, mask::Vec{N,Bool}) where {N, T<:PermuteTypes} =
+    _vcompress(v, mask, Val(:auto))
+
+@inline function _vpartition(v::Vec{N,T}, mask::Vec{N,Bool}, ::Val{P}) where {N,T,P}
+    k = count(mask)
+    if N == 2 || N == 4 || N == 8
+        return _table_partition(v, mask, Val(P)), k
+    end
+    # Selected lanes first, then the unselected ones shifted to start at lane k.
+    lo = _vcompress(v, mask, Val(P))
+    hi = _vcompress(v, !mask, Val(P))
+    lane = Vec{N,Int32}(ntuple(i -> Int32(i - 1), Val(N)))
+    shifted = _vpermute(hi, vifelse(lane >= Int32(k), lane - Int32(k), lane), Val(P))
+    return vifelse(lane < Int32(k), lo, shifted), k
+end
+
+"""
+    vpartition(v::Vec{N,T}, mask::Vec{N,Bool}) -> (Vec{N,T}, Int)
+
+Stable two-way partition of the lanes of `v`: the lanes selected by `mask` first,
+then the others, each group in its original order, together with
+`count(mask)`. This is the vectorized partition step of quicksort: storing the
+result once at each end of the output keeps both groups.
+
+For 2, 4 or 8 lanes this is one table lookup and one [`vpermute`](@ref), i.e. a
+single `vpermd`/`pshufb` on AVX2/SSSE3.
+
+# Example
+```jldoctest
+julia> v = Vec{4,Int}((10, 40, 20, 30));
+
+julia> vpartition(v, v < 25)
+(Vec{4, Int64}((10, 20, 40, 30)), 2)
+```
+"""
+@inline vpartition(v::Vec{N,T}, mask::Vec{N,Bool}) where {N, T<:PermuteTypes} =
+    _vpartition(v, mask, Val(:auto))

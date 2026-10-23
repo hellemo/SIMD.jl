@@ -1210,6 +1210,35 @@ llvm_ir(f, args) = sprint(code_llvm, f, Base.typesof(args...))
         end
     end
 
+    @testset "vcompress / vpartition" begin
+        function check(v::Vec{N}, m) where {N}
+            t, b = Tuple(v), Tuple(m)
+            sel = Tuple(t[i] for i in 1:N if b[i])
+            rest = Tuple(t[i] for i in 1:N if !b[i])
+            k = length(sel)
+            for P in (:auto, :generic)
+                @test Tuple(SIMD._vcompress(v, m, Val(P)))[1:k] === sel
+                r, kk = SIMD._vpartition(v, m, Val(P))
+                @test kk == k
+                @test Tuple(r) === (sel..., rest...)
+            end
+            @test Tuple(vcompress(v, m))[1:k] === sel
+            @test Tuple(first(vpartition(v, m))) === (sel..., rest...)
+        end
+        for T in (Int8, UInt8, Int16, UInt16, Int32, UInt32, Int64, UInt64,
+                  Float16, Float32, Float64)
+            for N in (1, 2, 3, 4, 8, 16, 32), _ in 1:10
+                check(Vec(ntuple(_ -> rand(T), N)), Vec(ntuple(_ -> rand(Bool), N)))
+            end
+        end
+        for T in (UInt32, Float64, Int16)          # every mask for 8 lanes
+            v = Vec(ntuple(i -> T(i), 8))
+            for mb in 0:255
+                check(v, Vec(ntuple(i -> (mb >> (i - 1)) & 1 == 1, 8)))
+            end
+        end
+    end
+
     @testset "count" begin
         for N in (1, 2, 3, 4, 7, 8, 16, 32, 64, 128, 130)
             for _ in 1:20
