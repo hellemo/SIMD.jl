@@ -102,8 +102,56 @@ end
     end
 end
 
+"""
+    vstorec(x::Vec{N,T}, ptr, mask::Vec{N,Bool})
+    vstorec(x::Vec{N,T}, a::AbstractVector{T}, i, mask::Vec{N,Bool})
+
+Compress-store: write the lanes of `x` selected by `mask`, in order, to
+consecutive elements starting at `ptr` (or `a[i]`). Exactly `count(mask)`
+elements are written. See also [`vstorec_overwrite`](@ref).
+
+On x86 with AVX2 but without AVX-512, this is a [`vcompress`](@ref) followed by
+a masked store, because LLVM expands `llvm.masked.compressstore` lane by lane
+there (about 20 times slower for 32- and 64-bit lanes). Elsewhere it is
+`llvm.masked.compressstore`.
+"""
 @inline vstorec(x::Vec{N, T}, ptr::AnyPtr{T}, mask::Vec{N, Bool}) where {N, T} =
-    Intrinsics.maskedcompressstore(x.data, ptr, mask.data)
+    _vstorec(x, ptr, mask, Val(:auto))
+
+@generated function _vstorec(x::Vec{N, T}, ptr::AnyPtr{T}, mask::Vec{N, Bool},
+                             ::Val{P}) where {N, T, P}
+    avx512 = Targets.has_feature(:avx512f) && Targets.has_feature(:avx512vl)
+    if P === :auto && T <: PermuteTypes && N > 1 && Targets.has_feature(:avx2) && !avx512
+        return quote
+            $(Expr(:meta, :inline))
+            vstore(vcompress(x, mask), ptr, _lanes(Val(N)) < Int32(count(mask)))
+            return nothing
+        end
+    end
+    return :($(Expr(:meta, :inline)); Intrinsics.maskedcompressstore(x.data, ptr, mask.data))
+end
+
+"""
+    vstorec_overwrite(x::Vec{N,T}, ptr, mask::Vec{N,Bool})
+    vstorec_overwrite(x::Vec{N,T}, a::AbstractVector{T}, i, mask::Vec{N,Bool})
+
+Like [`vstorec`](@ref), but stores all `N` lanes of [`vcompress(x, mask)`](@ref vcompress):
+the `count(mask)` selected lanes followed by `N - count(mask)` unspecified
+values. The caller must provide room for `N` elements; the extra ones are meant
+to be overwritten by the next store, as in a vectorized filter or partition
+loop. This is a single full-width store and the fastest form on all targets.
+"""
+@inline vstorec_overwrite(x::Vec{N, T}, ptr::AnyPtr{T}, mask::Vec{N, Bool}) where {N, T} =
+    (vstore(vcompress(x, mask), ptr); nothing)
+
+@propagate_inbounds function vstorec_overwrite(x::Vec{N, T}, a::FastContiguousArray{T,1},
+                                               i::Integer, mask::Vec{N, Bool}) where {N, T}
+    @boundscheck checkbounds(a, i:i + N - 1)
+    GC.@preserve a begin
+        vstorec_overwrite(x, pointer(a, i), mask)
+    end
+    return a
+end
 
 @propagate_inbounds function vstorec(x::Vec{N, T}, a::FastContiguousArray{T,1},
                                      i::Integer, mask::Vec{N, Bool}) where {N, T}

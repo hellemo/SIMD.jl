@@ -9,6 +9,9 @@
 
 const PermuteTypes = Union{IntegerTypes, FloatingTypes}
 
+# Lane numbers 0, 1, ..., N-1.
+@inline _lanes(::Val{N}) where {N} = Vec{N,Int32}(ntuple(i -> Int32(i - 1), Val(N)))
+
 _llvmbits(t::String) = parse(Int, t[2:end])        # "i32" -> 32
 
 # IR converting `<N x it> %src` to `<N x i\$to> %dst` (zext or trunc).
@@ -247,7 +250,7 @@ julia> vcompress(v, v > 15)[1:3]
     # Selected lanes first, then the unselected ones shifted to start at lane k.
     lo = _vcompress(v, mask, Val(P))
     hi = _vcompress(v, !mask, Val(P))
-    lane = Vec{N,Int32}(ntuple(i -> Int32(i - 1), Val(N)))
+    lane = _lanes(Val(N))
     shifted = _vpermute(hi, vifelse(lane >= Int32(k), lane - Int32(k), lane), Val(P))
     return vifelse(lane < Int32(k), lo, shifted), k
 end

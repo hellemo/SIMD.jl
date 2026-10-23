@@ -3,7 +3,7 @@ module SIMD
 using Base: @propagate_inbounds
 using Core: LLVMPtr
 
-export Vec, vload, vloada, vloadnt, vloadx, vstore, vstorea, vstorent, vstorec,
+export Vec, vload, vloada, vloadnt, vloadx, vstore, vstorea, vstorent, vstorec, vstorec_overwrite,
        vgather, vgathera, vscatter, vscattera, shufflevector, vifelse, valloc,
        VecRange, bitmask, vpermute, vcompress, vpartition
 

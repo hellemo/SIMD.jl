@@ -1031,7 +1031,14 @@ llvm_ir(f, args) = sprint(code_llvm, f, Base.typesof(args...))
                 @code_native vcompress!(dest, pred, src)
 
                 ir = llvm_ir(vcompress!, (dest, pred, src))
-                @test occursin("masked.compressstore.v4f64", ir)
+                if SIMD.Targets.has_feature(:avx2) &&
+                   !(SIMD.Targets.has_feature(:avx512f) && SIMD.Targets.has_feature(:avx512vl))
+                    # AVX2 without AVX-512: vcompress (table + vpermd) and a masked store
+                    @test occursin("llvm.x86.avx2.permd", ir)
+                    @test occursin("masked.store.v4f64", ir)
+                else
+                    @test occursin("masked.compressstore.v4f64", ir)
+                end
             end
         end
 
@@ -1235,6 +1242,31 @@ llvm_ir(f, args) = sprint(code_llvm, f, Base.typesof(args...))
             v = Vec(ntuple(i -> T(i), 8))
             for mb in 0:255
                 check(v, Vec(ntuple(i -> (mb >> (i - 1)) & 1 == 1, 8)))
+            end
+        end
+    end
+
+    @testset "vstorec / vstorec_overwrite" begin
+        for T in (Int8, UInt8, Int16, UInt16, Int32, UInt32, Int64, UInt64,
+                  Float16, Float32, Float64)
+            for N in (1, 2, 3, 4, 8, 16, 32), _ in 1:10
+                v = Vec(ntuple(_ -> rand(T), N)); m = Vec(ntuple(_ -> rand(Bool), N))
+                sel = [v[i] for i in 1:N if m[i]]; k = length(sel)
+                sentinel = T(42)
+                for P in (:auto, :generic)
+                    a = fill(sentinel, N + 4)
+                    GC.@preserve a SIMD._vstorec(v, pointer(a, 2), m, Val(P))
+                    @test a[2:(k + 1)] == sel                     # selected lanes, in order
+                    @test all(==(sentinel), a[1:1]) && all(==(sentinel), a[(k + 2):end])
+                end
+                a = fill(sentinel, N + 4)
+                vstorec(v, a, 2, m)
+                @test a[2:(k + 1)] == sel && all(==(sentinel), a[(k + 2):end])
+                b = fill(sentinel, N + 4)
+                vstorec_overwrite(v, b, 2, m)
+                @test b[2:(k + 1)] == sel
+                @test b[1] == sentinel && all(==(sentinel), b[(N + 2):end])   # nothing past N lanes
+                @test_throws BoundsError vstorec_overwrite(v, zeros(T, N - 1 + 1), 2, m)
             end
         end
     end
