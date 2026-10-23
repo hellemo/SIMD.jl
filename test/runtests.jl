@@ -1186,6 +1186,30 @@ llvm_ir(f, args) = sprint(code_llvm, f, Base.typesof(args...))
         end
     end
 
+    @testset "vpermute" begin
+        ref(v, idx) = Vec(ntuple(i -> v[Int(idx[i]) + 1], length(v)))
+        for T in (Int8, UInt8, Int16, UInt16, Int32, UInt32, Int64, UInt64,
+                  Float16, Float32, Float64)
+            for N in (1, 2, 3, 4, 8, 16, 32)
+                for I in (UInt8, Int32, Int64), _ in 1:10
+                    v = Vec(ntuple(_ -> rand(T), N))
+                    idx = Vec(ntuple(_ -> I(rand(0:(N - 1))), N))
+                    r = ref(v, idx)
+                    @test vpermute(v, idx) === r
+                    @test SIMD._vpermute(v, idx, Val(:generic)) === r
+                end
+            end
+        end
+        native(f, types) = sprint(io -> code_native(io, f, types; debuginfo = :none))
+        if SIMD.Targets.has_feature(:avx2)
+            @test occursin("vperm", native(vpermute, Tuple{Vec{8,UInt32},Vec{8,UInt32}}))
+            @test occursin("vperm", native(vpermute, Tuple{Vec{4,Float64},Vec{4,Int64}}))
+        end
+        if SIMD.Targets.has_feature(:ssse3)
+            @test occursin("pshufb", native(vpermute, Tuple{Vec{16,UInt8},Vec{16,UInt8}}))
+        end
+    end
+
     @testset "count" begin
         for N in (1, 2, 3, 4, 7, 8, 16, 32, 64, 128, 130)
             for _ in 1:20

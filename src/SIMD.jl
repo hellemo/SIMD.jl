@@ -5,7 +5,7 @@ using Core: LLVMPtr
 
 export Vec, vload, vloada, vloadnt, vloadx, vstore, vstorea, vstorent, vstorec,
        vgather, vgathera, vscatter, vscattera, shufflevector, vifelse, valloc,
-       VecRange, bitmask
+       VecRange, bitmask, vpermute
 
 const VE         = Base.VecElement
 const LVec{N, T} = NTuple{N, VE{T}}
@@ -23,6 +23,7 @@ const VecTypes      = Union{BScalarTypes, Ptr, LLVMPtr}
 include("targets.jl")
 include("LLVM_intrinsics.jl")
 include("simdvec.jl")
+include("permute.jl")
 include("arrayops.jl")
 include("precompile.jl")
 
